@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared files</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a212b; --line:#2a3441; --text:#e6edf3; --muted:#8b98a8; --accent:#4cc2ff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f5f7fa; --card:#fff; --line:#dde3ea; --text:#17202a; --muted:#5b6877; --accent:#0a74c4; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); font-size:18px; font-weight:600; }
+  main { max-width:900px; margin:0 auto; padding:20px 16px 60px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; cursor:pointer; }
+  .tile:hover { border-color:var(--accent); }
+  .tile .ico { font-size:28px; }
+  .tile .nm { font-weight:600; margin-top:6px; word-break:break-word; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .crumbs a { color:var(--accent); cursor:pointer; }
+  input[type=search] { font:inherit; padding:7px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--text); flex:1; min-width:140px; }
+  .list { background:var(--card); border:1px solid var(--line); border-radius:10px; }
+  .item { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .item:last-child { border-bottom:0; }
+  .item:hover { background:rgba(127,127,127,.08); }
+  .item .nm { flex:1; word-break:break-word; }
+  a.dl { color:var(--accent); text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:3px 10px; font-size:13px; }
+  .msg { text-align:center; color:var(--muted); padding:60px 10px; }
+  #viewer { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none; align-items:center; justify-content:center; flex-direction:column; gap:10px; padding:16px; color:#fff; }
+  #viewer video, #viewer img { max-width:100%; max-height:80vh; }
+  #viewer audio { width:min(560px,100%); }
+  #viewer button, #viewer a { font:inherit; background:transparent; color:#fff; border:1px solid #666; border-radius:8px; padding:6px 14px; text-decoration:none; cursor:pointer; }
+</style>
+</head>
+<body>
+<header>📂 Shared files</header>
+<main>
+  <div id="bar" class="bar" hidden>
+    <div class="crumbs muted" id="crumbs"></div>
+    <input type="search" id="q" placeholder="Filter this folder…">
+  </div>
+  <div id="content"></div>
+</main>
+<div id="viewer"><div id="vbody"></div><div><a id="vdl" href="#">Download</a> <button onclick="closeViewer()">Close</button></div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => { const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<4){n/=1024;i++} return n.toFixed(n<10&&i?1:0)+' '+u[i]; };
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const enc = p => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+const icon = {folder:'📁', video:'🎬', audio:'🎵', image:'🖼', file:'📄'};
+let state = {sid:null, path:'', entries:[], share:''};
+
+async function get(url) {
+  const r = await fetch(url);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(d.detail || 'Something went wrong'); e.status = r.status; throw e; }
+  return d;
+}
+const message = t => { $('#bar').hidden = true; $('#content').innerHTML = `<div class="msg">${esc(t)}</div>`; };
+
+async function route() {
+  const h = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+  const [sid, ...rest] = h.split('/');
+  try {
+    if (!sid) return await home();
+    await openFolder(sid, rest.join('/'));
+  } catch (e) {
+    message(e.status === 503 ? 'This page is currently unavailable.' : e.status === 404 ? 'That folder is not available.' : e.message);
+  }
+}
+
+async function home() {
+  const d = await get('/api/c/shares');
+  $('#bar').hidden = true;
+  if (!d.shares.length) return message('Nothing is shared yet.');
+  $('#content').innerHTML = '<div class="grid">' + d.shares.map(s =>
+    `<div class="tile" onclick="location.hash='#/${encodeURIComponent(s.id)}'"><div class="ico">📁</div><div class="nm">${esc(s.name)}</div></div>`).join('') + '</div>';
+}
+
+async function openFolder(sid, path) {
+  const d = await get('/api/c/files/' + encodeURIComponent(sid) + (path ? '/' + enc(path) : ''));
+  state = {sid, path: d.path, entries: d.entries, share: d.share};
+  $('#q').value = '';
+  renderFolder();
+}
+
+function link(sid, path) { return '#/' + encodeURIComponent(sid) + (path ? '/' + enc(path) : ''); }
+
+function renderFolder() {
+  const {sid, path, share} = state;
+  $('#bar').hidden = false;
+  let acc = '';
+  $('#crumbs').innerHTML = `<a href="#/">All</a> / <a href="${link(sid,'')}">${esc(share)}</a>` +
+    path.split('/').filter(Boolean).map(p => { acc += (acc?'/':'') + p; return ` / <a href="${link(sid, acc)}">${esc(p)}</a>`; }).join('');
+  const q = $('#q').value.trim().toLowerCase();
+  const rows = state.entries.map((e,i) => ({e,i})).filter(({e}) => !q || e.name.toLowerCase().includes(q));
+  $('#content').innerHTML = rows.length ? '<div class="list">' + rows.map(({e,i}) =>
+    `<div class="item" data-i="${i}"><span>${icon[e.kind]}</span><span class="nm">${esc(e.name)}</span>` +
+    (e.dir ? '' : `<span class="muted">${fmt(e.size)}</span><a class="dl" href="${fileUrl(e,1)}" onclick="event.stopPropagation()">Download</a>`) + '</div>').join('') + '</div>'
+    : `<div class="msg">${q ? 'No matches.' : 'This folder is empty.'}</div>`;
+  document.querySelectorAll('.item').forEach(el => el.onclick = () => activate(state.entries[+el.dataset.i]));
+}
+
+function fileUrl(e, dl) {
+  const rel = (state.path ? state.path + '/' : '') + e.name;
+  return '/c/file/' + encodeURIComponent(state.sid) + '/' + enc(rel) + (dl ? '?dl=1' : '');
+}
+
+function activate(e) {
+  if (e.dir) { location.hash = link(state.sid, (state.path ? state.path + '/' : '') + e.name); return; }
+  const src = fileUrl(e, 0);
+  $('#vdl').href = fileUrl(e, 1);
+  if (e.kind === 'video') view(`<video src="${src}" controls autoplay></video>`);
+  else if (e.kind === 'audio') view(`<audio src="${src}" controls autoplay></audio><div>${esc(e.name)}</div>`);
+  else if (e.kind === 'image') view(`<img src="${src}" alt="${esc(e.name)}">`);
+  else location.href = fileUrl(e, 1);
+}
+function view(html) { $('#vbody').innerHTML = html; $('#viewer').style.display = 'flex'; }
+function closeViewer() { $('#viewer').style.display = 'none'; $('#vbody').innerHTML = ''; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+$('#q').oninput = () => { if (state.sid) renderFolder(); };
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>
