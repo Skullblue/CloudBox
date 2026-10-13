@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# cloudbox: turn your cloud on/off.   Usage: cloudbox {start|stop|restart|status|url|logs|autostart on|off}
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+MNT=/srv/cloudbox/mnt
+CMD="${1:-help}"
+
+usage() {
+  cat <<EOF
+CloudBox control
+
+  cloudbox start            Turn the cloud ON (dashboard + public ngrok link)
+  cloudbox stop             Turn it OFF: stops sharing and unmounts shared drives so they are safe to remove
+  cloudbox restart          Stop, then start
+  cloudbox status           Show whether it is running, the public link, and shared drives
+  cloudbox url              Print the public link
+  cloudbox logs             Follow the logs (Ctrl+C to leave)
+  cloudbox reset-password   Forgot your password? Set a new one (works even if CloudBox is off)
+  cloudbox autostart on     Start automatically when the computer boots (default)
+  cloudbox autostart off    Stay off after a reboot until you run 'cloudbox start'
+EOF
+}
+
+case "$CMD" in help|-h|--help) usage; exit 0;; esac
+
+# Needs root (docker + unmounting); re-run through sudo if needed
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+cd "$DIR"
+
+running() { [[ -n "$(docker compose ps -q --status running 2>/dev/null)" ]]; }
+
+public_url() {
+  docker compose exec -T app python -c '
+import json, urllib.request
+try:
+    d = json.load(urllib.request.urlopen("http://ngrok:4040/api/tunnels", timeout=2))
+    print(next((t["public_url"] for t in d["tunnels"] if t["public_url"].startswith("https")), ""))
+except Exception:
+    print("")' 2>/dev/null || true
+}
+
+wait_url() {
+  local u="" i
+  for i in $(seq 1 20); do
+    u="$(public_url)"; [[ -n "$u" ]] && break; sleep 1
+  done
+  if [[ -n "$u" ]]; then echo "Public link: $u"; else echo "Public link not ready yet. Run 'cloudbox url' in a few seconds."; fi
+}
+
+unmount_shares() {
+  local m busy=0
+  for m in $(findmnt -rno TARGET | grep "^$MNT/" | sort -r); do
+    if umount "$m" 2>/dev/null; then echo "Unmounted $m"; else echo "Could not unmount $m (still in use)"; busy=1; fi
+  done
+  return $busy
+}
+
+case "$CMD" in
+  start)
+    systemctl start cloudbox-mounts.service 2>/dev/null || true
+    docker compose start >/dev/null 2>&1 || docker compose up -d
+    echo "CloudBox is ON."
+    echo "Admin (this computer): http://localhost:8000/admin"
+    wait_url
+    ;;
+  stop)
+    docker compose stop
+    unmount_shares || echo "Close anything using those drives, then run 'cloudbox stop' again before unplugging."
+    echo "CloudBox is OFF. Your files were not touched."
+    ;;
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+  status)
+    if running; then echo "CloudBox: ON"; wait_url; else echo "CloudBox: OFF"; fi
+    echo "Shared drives:"
+    findmnt -rno TARGET,SOURCE | grep "^$MNT/" || echo "  (none)"
+    ;;
+  url)
+    running || { echo "CloudBox is off. Run: cloudbox start"; exit 1; }
+    public_url
+    ;;
+  logs)
+    docker compose logs -f --tail=100
+    ;;
+  reset-password)
+    echo "Set a new CloudBox password (this signs out every device)."
+    read -rsp "New password (min 8 characters): " P1; echo
+    read -rsp "Repeat new password: " P2; echo
+    [[ "$P1" == "$P2" ]] || { echo "Passwords do not match."; exit 1; }
+    [[ ${#P1} -ge 8 ]] || { echo "Password must be at least 8 characters."; exit 1; }
+    # one-off container with the same data volume; password goes via stdin, not the command line
+    printf '%s' "$P1" | docker compose run --rm --no-deps -T app python reset_password.py
+    ;;
+  autostart)
+    case "${2:-}" in
+      on)  docker update --restart=unless-stopped cloudbox-app cloudbox-ngrok >/dev/null; echo "CloudBox will start automatically at boot." ;;
+      off) docker update --restart=no cloudbox-app cloudbox-ngrok >/dev/null; echo "CloudBox will stay off after a reboot until you run 'cloudbox start'." ;;
+      *)   usage; exit 1 ;;
+    esac
+    ;;
+  *)
+    usage; exit 1
+    ;;
+esac

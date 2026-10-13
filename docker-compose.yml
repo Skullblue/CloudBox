@@ -1,0 +1,39 @@
+services:
+  app:
+    build: ./app
+    container_name: cloudbox-app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MOUNT_ROOT: /mnt/cloudbox
+      DATA_DIR: /data
+    volumes:
+      # Host dir is made rshared by install.sh so mounts made inside show up on the host
+      - /srv/cloudbox/mnt:/mnt/cloudbox:rshared
+      - cloudbox-data:/data
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      # lets CloudBox reuse drives the Ubuntu desktop already auto-mounted (rslave = sees new mounts)
+      - /media:/host-media:rslave
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    # allow the container to read/mount block devices only (not char devices)
+    device_cgroup_rules:
+      - "b *:* rmw"
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: cloudbox-ngrok
+    restart: unless-stopped
+    command: ["http", "app:8000", "--log=stdout"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    depends_on:
+      - app
+
+volumes:
+  cloudbox-data:
