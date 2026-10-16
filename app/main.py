@@ -11,6 +11,7 @@ import time
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
+from starlette.concurrency import run_in_threadpool
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -444,6 +445,78 @@ def media(drive: str, path: str, _: None = Depends(require_auth)):
         raise HTTPException(404, "File not found.")
     # FileResponse supports HTTP Range, so seeking in video/audio works
     return FileResponse(p)
+
+# ---------- upload / new folder (admin only) ----------
+def writable_dir(drive: str, rel: str) -> Path:
+    base = MOUNT_ROOT / safe_name(drive)
+    if not base.is_mount():
+        raise HTTPException(404, "Drive not mounted.")
+    if not _is_rw(base):
+        raise HTTPException(403, "This drive is shared read-only. Stop sharing it, then share it again with 'allow writes' ticked.")
+    p = resolve(drive, rel)
+    if not p.is_dir():
+        raise HTTPException(404, "Target folder not found.")
+    return p
+
+
+def clean_name(n: str) -> str:
+    n = n.strip()
+    if not n or n in (".", "..") or any(c in n for c in '/\\\0') or len(n.encode()) > 200:
+        raise HTTPException(400, f"Invalid name: {n[:40]!r}")
+    return n
+
+
+def unique(path: Path) -> Path:
+    """If 'movie.mp4' exists, return 'movie (2).mp4', and so on. Never overwrites."""
+    c, i = path, 2
+    while c.exists():
+        c = path.with_name(f"{path.stem} ({i}){path.suffix}")
+        i += 1
+    return c
+
+
+def inside(root: Path, p: Path) -> bool:
+    p = p.resolve()
+    return p == root or root in p.parents
+
+
+@app.post("/api/mkdir")
+async def mkdir(request: Request, _: None = Depends(require_auth)):
+    body = await request.json()
+    parent = writable_dir(str(body.get("drive", "")), str(body.get("path", "")))
+    target = parent / clean_name(str(body.get("name", "")))
+    if target.exists():
+        raise HTTPException(409, "A file or folder with that name already exists.")
+    target.mkdir()
+    return {"ok": True}
+
+
+@app.put("/api/upload")
+async def upload(request: Request, drive: str, path: str = "", name: str = "", _: None = Depends(require_auth)):
+    """Upload ONE file as the raw request body. `name` may be 'Trip/Day1/a.jpg' (folder upload);
+    missing sub-folders are created inside `path`."""
+    parent = writable_dir(drive, path)
+    root = (MOUNT_ROOT / safe_name(drive)).resolve()
+    parts = [clean_name(p) for p in name.replace("\\", "/").split("/") if p]
+    if not parts:
+        raise HTTPException(400, "Missing file name.")
+    d = parent
+    for part in parts[:-1]:
+        d = d / part
+        d.mkdir(exist_ok=True)
+        if not inside(root, d):
+            raise HTTPException(403, "Forbidden path.")
+    final = unique(d / parts[-1])
+    tmp = final.with_name(final.name + ".part")
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                await run_in_threadpool(f.write, chunk)
+        os.replace(tmp, final)
+    except BaseException:  # cancelled, disk full, network drop: leave no half file behind
+        tmp.unlink(missing_ok=True)
+        raise
+    return {"ok": True, "name": final.name}
 
 
 # ---------- tunnel ----------

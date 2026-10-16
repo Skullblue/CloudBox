@@ -83,8 +83,17 @@
 
     <h2 id="libTitle" hidden>Library</h2>
     <div id="lib" class="card" hidden>
-      <div class="row" style="margin-bottom:6px"><div class="crumbs muted grow" id="crumbs"></div><button id="shareHere">Share with clients</button></div>
-      <div id="list"></div>
+      <div class="row" style="margin-bottom:6px">
+  <div class="crumbs muted grow" id="crumbs"></div>
+  <button class="ghost" id="newFolder">New folder</button>
+  <button class="ghost" id="upFilesBtn">Upload files</button>
+  <button class="ghost" id="upFolderBtn">Upload folder</button>
+  <button id="shareHere">Share with clients</button>
+  <input type="file" id="upFiles" multiple hidden>
+  <input type="file" id="upFolder" webkitdirectory hidden>
+</div>
+<div id="upStatus" class="muted" style="margin-bottom:6px"></div>
+<div id="list"></div>
     </div>
 
     <h2>Account</h2>
@@ -232,6 +241,45 @@ async function unmount(name) {
   showErr('');
   if (cur.drive === name) { $('#lib').hidden = true; $('#libTitle').hidden = true; cur = {drive:null, path:''}; }
   try { await post('/api/unmount', {name}); await loadDrives(); loadShares(); } catch (e) { showErr(e.message); }
+}
+
+// ---- upload / new folder ----
+$('#newFolder').onclick = async () => {
+  const name = prompt('New folder name:'); if (!name) return;
+  try { await post('/api/mkdir', {drive: cur.drive, path: cur.path, name}); browse(); }
+  catch (e) { showErr(e.message); }
+};
+$('#upFilesBtn').onclick = () => $('#upFiles').click();
+$('#upFolderBtn').onclick = () => $('#upFolder').click();
+$('#upFiles').onchange = e => upload([...e.target.files]);
+$('#upFolder').onchange = e => upload([...e.target.files]);
+
+function putFile(file, rel, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', '/api/upload?drive=' + encodeURIComponent(cur.drive) + '&path=' + encodeURIComponent(cur.path) + '&name=' + encodeURIComponent(rel));
+    x.upload.onprogress = ev => ev.lengthComputable && onProgress(ev.loaded / ev.total);
+    x.onload = () => {
+      if (x.status < 300) return resolve();
+      let msg = 'Upload failed (' + x.status + ')';
+      try { msg = JSON.parse(x.responseText).detail || msg; } catch {}
+      reject(new Error(msg));
+    };
+    x.onerror = () => reject(new Error('Network error'));
+    x.send(file);
+  });
+}
+
+async function upload(files) {
+  if (!cur.drive || !files.length) return;
+  showErr('');
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i], rel = f.webkitRelativePath || f.name;   // keeps folder structure for "Upload folder"
+    try { await putFile(f, rel, p => $('#upStatus').textContent = `Uploading ${i + 1}/${files.length}: ${rel} (${Math.round(p * 100)}%)`); }
+    catch (e) { showErr(rel + ': ' + e.message); break; }
+  }
+  $('#upStatus').textContent = ''; $('#upFiles').value = ''; $('#upFolder').value = '';
+  browse();
 }
 
 function openDrive(name) { cur = {drive:name, path:''}; browse(); }
